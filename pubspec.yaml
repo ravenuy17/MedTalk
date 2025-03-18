@@ -1,0 +1,30 @@
+name: flutter_application_1
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.5.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+  camera: ^0.11.0+2
+  google_mlkit_text_recognition: ^0.14.0
+  tflite_flutter: ^0.11.0
+  csv: ^6.0.0
+  flutter_tts: ^4.2.2
+  speech_to_text: ^7.0.0
+  mongo_dart: ^0.10.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+assets: 
+  - assets/models/text_classification_model.tflite
+  - assets/DOH_Medication_List.csv
+  - assets/Medication_List.csv
