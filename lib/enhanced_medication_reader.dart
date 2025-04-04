@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -5,10 +7,9 @@ import 'package:google_mlkit_entity_extraction/google_mlkit_entity_extraction.da
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:camera/camera.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
-import 'package:flutter_application_1/services/mongo_service.dart';
-import 'package:lib/model/medication_model.dart';
-import 'package:flutter_application_1/utils/string_utils.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'services/mongo_service.dart'; // Ensure this file exists in your services folder
 
 class EnhancedMedicationReaderScreen extends StatefulWidget {
   final String imagePath;
@@ -72,6 +73,7 @@ class _EnhancedMedicationReaderScreenState
     try {
       // Initialize ML Kit components
       _textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+      // NOTE: Use annotateText instead of extractEntities
       _entityExtractor =
           EntityExtractor(language: EntityExtractorLanguage.english);
 
@@ -115,7 +117,7 @@ class _EnhancedMedicationReaderScreenState
     try {
       // Load TFLite model for additional medication classification
       _tfliteInterpreter = await Interpreter.fromAsset(
-          'assets/models/text_classification_model.tflite');
+          'assets/models/medication_classifier.tflite');
       debugPrint("TFLite model loaded successfully");
     } catch (e) {
       debugPrint("Failed to load TFLite model: $e");
@@ -171,7 +173,7 @@ class _EnhancedMedicationReaderScreenState
       // Extract structured text blocks for better context
       for (var textBlock in recognizedText.blocks) {
         for (var line in textBlock.lines) {
-          // Process each line for entity extraction
+          // Process each line for entity extraction using the updated API
           await _extractEntitiesFromText(line.text);
         }
       }
@@ -181,17 +183,18 @@ class _EnhancedMedicationReaderScreenState
   }
 
   Future<void> _extractEntitiesFromText(String text) async {
+    // Use annotateText instead of extractEntities per updated API
     final List<EntityAnnotation> annotations =
-        await _entityExtractor.extractEntities(text);
+        await _entityExtractor.annotateText(text);
 
     for (final entity in annotations) {
       if (entity.entities.isNotEmpty) {
         for (final entityType in entity.entities) {
-          // Focus on medication-related entities
+          // Focus on medication-related entities (this example uses a few types)
           if (entityType.type == EntityType.address ||
               entityType.type == EntityType.quantity ||
               entityType.type == EntityType.date) {
-            // Store these for context
+            // Store these keywords for context
             _processedKeywords.add(entity.text);
           }
         }
@@ -242,7 +245,10 @@ class _EnhancedMedicationReaderScreenState
       // Combine and deduplicate results, prioritizing higher confidence matches
       setState(() {
         recognizedMedications = _combineAndDeduplicateResults(
-            dictionaryMatches, nlpMatches, tfliteMatches);
+          dictionaryMatches,
+          nlpMatches,
+          tfliteMatches,
+        );
       });
 
       // Fetch additional details for recognized medications
@@ -308,185 +314,159 @@ class _EnhancedMedicationReaderScreenState
     brandToGenericName.forEach((brand, genericName) {
       if (lowerText.contains(brand.toLowerCase())) {
         foundMedications.add(MedicationInfo(
-            brandName: StringUtils.toTitleCase(brand),
-            genericName: StringUtils.toTitleCase(genericName),
-            confidence: 0.95,
-            source: "database"));
+          brandName: StringUtils.toTitleCase(brand),
+          genericName: StringUtils.toTitleCase(genericName),
+          confidence: 0.95,
+          source: "database",
+        ));
       }
     });
 
     return foundMedications;
   }
 
-  Future<List<MedicationInfo>> _performNLPExtraction(String text) async {
-    final foundMedications = <MedicationInfo>[];
+  // Replace the current TFLite implementation with this more robust approach
+Future<List<MedicationInfo>> _performTFLiteClassification(String text) async {
+  final foundMedications = <MedicationInfo>[];
+  
+  try {
+    if (_tfliteInterpreter == null) return [];
+    
+    // Use BertTokenizer-style approach for better text encoding
+    final encodedText = await _encodeTextForBert(text);
+    
+    // Process with sliding window to handle longer texts
+    List<MedicationInfo> allPredictions = [];
+    for (int i = 0; i < encodedText.length - _maxSequenceLength + 1; i += _strideLength) {
+      final inputSequence = encodedText.sublist(
+          i, min(i + _maxSequenceLength, encodedText.length));
+      
+      // Pad sequence if needed
+      final paddedSequence = _padSequence(inputSequence, _maxSequenceLength);
+      
+      // Create input tensor shape expected by the model (batch_size=1, seq_length)
+      final inputShape = [1, _maxSequenceLength];
+      final input = [paddedSequence];
+      
+      // Define output tensors
+      // Assuming model outputs [1, num_classes] for classification scores
+      final outputShape = [1, _numMedicationClasses];
+      final output = List.generate(
+          outputShape[0], (_) => List<double>.filled(outputShape[1], 0));
+      
+      // Run inference
+      _tfliteInterpreter!.runForMultipleInputs([input], [output]);
+      
+      // Process results (find medications above threshold)
+      final predictions = _processClassificationResults(output[0], i);
+      allPredictions.addAll(predictions);
+    }
+    
+    // Group and deduplicate predicted medications
+    foundMedications.addAll(_consolidatePredictions(allPredictions));
+    
+  } catch (e) {
+    debugPrint("TFLite classification error: $e");
+  }
+  
+  return foundMedications;
+}
 
-    try {
-      // Use Entity Extraction to find medication mentions using ML Kit's NLP capabilities
-      final entities = await _entityExtractor.extractEntities(text);
-
-      for (final entity in entities) {
-        // Attempt to match medication patterns
-        if (_isMedicationPattern(entity.text)) {
-          // Search our database for potential matches
-          final matches =
-              await _mongoService.searchSimilarMedications(entity.text);
-
-          for (final match in matches) {
-            foundMedications.add(MedicationInfo(
-                brandName: match['brandName'],
-                genericName: match['genericName'],
-                confidence: match['similarity'] ?? 0.8,
-                source: "nlp"));
+// Process classification results with span information
+List<MedicationInfo> _processClassificationResults(
+    List<double> scores, int startPosition) {
+  final results = <MedicationInfo>[];
+  
+  // Map from classification index to medication info
+  final medicationDatabase = await _loadMedicationDatabase();
+  
+  for (int i = 0; i < scores.length; i++) {
+    if (scores[i] > _confidenceThreshold) {
+      // Look up medication info from our database
+      if (medicationDatabase.containsKey(i)) {
+        final medInfo = medicationDatabase[i]!;
+        results.add(MedicationInfo(
+          brandName: medInfo.brandName,
+          genericName: medInfo.genericName,
+          confidence: scores[i],
+          source: "tflite",
+          // Store metadata about where in text this was found
+          metadata: {
+            'startPosition': startPosition,
+            'textSpan': _originalTextSpans[startPosition],
           }
-        }
-      }
-    } catch (e) {
-      debugPrint("NLP extraction error: $e");
-    }
-
-    return foundMedications;
-  }
-
-  bool _isMedicationPattern(String text) {
-    final pattern = RegExp(
-        r'\b\d+\s*mg\b|\b\d+\s*mcg\b|\b\d+\s*ml\b|\btablet(s)?\b|\bcapsule(s)?\b',
-        caseSensitive: false);
-    return pattern.hasMatch(text);
-  }
-
-  Future<List<MedicationInfo>> _performTFLiteClassification(String text) async {
-    final foundMedications = <MedicationInfo>[];
-
-    try {
-      if (_tfliteInterpreter == null) return [];
-
-      // Prepare text chunks for classification
-      final chunks = _prepareTextChunks(text);
-
-      for (final chunk in chunks) {
-        List<List<double>> inputVector = _textToInputVector(chunk);
-
-        List<List<double>> outputVector =
-            List.generate(1, (_) => List<double>.filled(100, 0));
-
-        _tfliteInterpreter!.run(inputVector, outputVector);
-
-        int bestClassIndex = 0;
-        double bestConfidence = 0;
-
-        for (int i = 0; i < outputVector[0].length; i++) {
-          if (outputVector[0][i] > bestConfidence) {
-            bestConfidence = outputVector[0][i];
-            bestClassIndex = i;
-          }
-        }
-
-        if (bestConfidence > _confidenceThreshold) {
-          final Map<int, Map<String, String>> mockMedicationClasses = {
-            0: {"brand": "Tylenol", "generic": "Acetaminophen"},
-            1: {"brand": "Advil", "generic": "Ibuprofen"},
-            2: {"brand": "Lipitor", "generic": "Atorvastatin"},
-          };
-
-          if (mockMedicationClasses.containsKey(bestClassIndex)) {
-            final medInfo = mockMedicationClasses[bestClassIndex]!;
-            foundMedications.add(MedicationInfo(
-                brandName: medInfo["brand"] ?? "Unknown",
-                genericName: medInfo["generic"] ?? "Unknown",
-                confidence: bestConfidence,
-                source: "tflite"));
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint("TFLite classification error: $e");
-    }
-
-    return foundMedications;
-  }
-
-  List<String> _prepareTextChunks(String text) {
-    const maxLength = 50;
-    final words = text.split(' ');
-    final chunks = <String>[];
-
-    for (int i = 0; i < words.length; i += maxLength) {
-      final end = (i + maxLength < words.length) ? i + maxLength : words.length;
-      chunks.add(words.sublist(i, end).join(' '));
-    }
-
-    return chunks;
-  }
-
-  List<List<double>> _textToInputVector(String text) {
-    List<List<double>> inputVector =
-        List.generate(1, (_) => List<double>.filled(128, 0.0));
-
-    final words = text.toLowerCase().split(RegExp(r'\W+'));
-
-    final Map<String, int> wordToIndex = {
-      'tablet': 0,
-      'capsule': 1,
-      'mg': 2,
-      'dose': 3,
-      'oral': 4,
-      'daily': 5,
-    };
-
-    for (final word in words) {
-      if (wordToIndex.containsKey(word)) {
-        inputVector[0][wordToIndex[word]] = 1.0;
+        ));
       }
     }
-
-    return inputVector;
   }
+  
+  return results;
+}
 
-  List<MedicationInfo> _combineAndDeduplicateResults(
-      List<MedicationInfo> dictionaryMatches,
-      List<MedicationInfo> nlpMatches,
-      List<MedicationInfo> tfliteMatches) {
-    final allMatches = [...dictionaryMatches, ...nlpMatches, ...tfliteMatches];
-
-    final Map<String, List<MedicationInfo>> grouped = {};
-
-    for (final match in allMatches) {
-      final key = match.genericName.toLowerCase();
-      grouped[key] = grouped[key] ?? [];
-      grouped[key]!.add(match);
+// Consolidate predictions by grouping similar medications
+List<MedicationInfo> _consolidatePredictions(List<MedicationInfo> predictions) {
+  // Group by generic name
+  final Map<String, List<MedicationInfo>> grouped = {};
+  
+  for (final pred in predictions) {
+    final key = pred.genericName.toLowerCase();
+    grouped[key] = grouped[key] ?? [];
+    grouped[key]!.add(pred);
+  }
+  
+  // For each group, use a weighted confidence approach
+  final result = <MedicationInfo>[];
+  grouped.forEach((key, meds) {
+    // Sort by confidence
+    meds.sort((a, b) => b.confidence.compareTo(a.confidence));
+    
+    // Use the highest confidence medication but boost confidence if 
+    // multiple instances were found
+    final highestConfMed = meds.first;
+    double adjustedConfidence = highestConfMed.confidence;
+    
+    // Boost confidence if multiple detections
+    if (meds.length > 1) {
+      // Logarithmic scaling to avoid too high confidence
+      adjustedConfidence = min(
+        0.99, 
+        highestConfMed.confidence + 0.1 * log(meds.length)
+      );
     }
-
-    final result = <MedicationInfo>[];
-
-    grouped.forEach((key, matches) {
-      matches.sort((a, b) => b.confidence.compareTo(a.confidence));
-      result.add(matches.first);
-    });
-
-    return result;
-  }
-
-  Future<void> _fetchMedicationDetails() async {
-    if (!_isConnected || recognizedMedications.isEmpty) return;
-
-    try {
-      await _mongoService.connect();
-
-      for (final medication in recognizedMedications) {
-        final details =
-            await _mongoService.fetchMedicationDetails(medication.genericName);
-
-        if (details != null) {
-          medicationDetails[medication.genericName] = details;
-        }
+    
+    result.add(MedicationInfo(
+      brandName: highestConfMed.brandName,
+      genericName: highestConfMed.genericName,
+      confidence: adjustedConfidence,
+      source: "tflite+ensemble",
+      metadata: {
+        'occurrences': meds.length,
+        'textSpans': meds.map((m) => m.metadata?['textSpan']).toList(),
       }
+    ));
+  });
+  
+  return result;
+}
 
-      await _mongoService.close();
-    } catch (e) {
-      debugPrint("Failed to fetch medication details: $e");
-    }
-  }
+// Updated MedicationInfo class to include metadata
+class MedicationInfo {
+  final String brandName;
+  final String genericName;
+  final double confidence;
+  final String source;
+  final Map<String, dynamic>? metadata;
+
+  MedicationInfo({
+    required this.brandName,
+    required this.genericName,
+    required this.confidence,
+    required this.source,
+    this.metadata,
+  });
+  
+  // Rest of the class remains the same
+}
 
   // -------------------- TTS HELPERS -------------------- //
 
@@ -543,97 +523,51 @@ class _EnhancedMedicationReaderScreenState
     }
   }
 
-  // -------------------- NEW NLP FUNCTIONS -------------------- //
-
-  // Process the voice command using basic NLP (regex parsing)
-  Future<void> _processVoiceCommand(String command) async {
-    final lowerCommand = command.toLowerCase().trim();
-    // The regex looks for commands starting with keywords like "search", "read", "what is", or "side effects of"
-    final RegExp commandRegex =
-        RegExp(r'^(search|read|what is|side effects of)\s+(.+)$');
-    final match = commandRegex.firstMatch(lowerCommand);
-    if (match != null) {
-      final action = match.group(1)!; // e.g., "search", "read"
-      final medicationQuery = match.group(2)!;
-      final medicationName = StringUtils.toTitleCase(medicationQuery);
-      await _performMedicationQuery(action, medicationName);
-    } else {
-      await _speak(
-          "Command not recognized. Please try again with a valid phrase such as 'Search Lipitor' or 'What is Advil'.");
+  Future<void> _searchByVoiceQuery() async {
+    if (_voiceSearchQuery.isEmpty) {
+      await _speak("Please say a medication name first.");
+      return;
     }
-  }
 
-  // Execute the medication query based on the parsed command
-  Future<void> _performMedicationQuery(
-      String action, String medicationName) async {
+    final query = StringUtils.toTitleCase(_voiceSearchQuery);
     bool found = false;
 
-    // First, check in the already recognized medications
+    // First, search in recognized medications
     for (var med in recognizedMedications) {
-      if (med.brandName.toLowerCase() == medicationName.toLowerCase() ||
-          med.genericName.toLowerCase() == medicationName.toLowerCase()) {
+      if (med.brandName.contains(query) || med.genericName.contains(query)) {
         found = true;
-        if (action.contains("read") ||
-            action.contains("what is") ||
-            action.contains("side effects")) {
-          await _speak(
-              "Medication ${med.brandName} found. Generic name is ${med.genericName}.");
-          if (medicationDetails.containsKey(med.genericName)) {
-            final details = medicationDetails[med.genericName];
-            final usageInfo =
-                details['usage'] ?? 'No usage information available';
-            final sideEffects = details['sideEffects'] ??
-                'No side effects information available';
-            await _speak("Usage: $usageInfo. Side effects: $sideEffects.");
-          } else {
-            await _speak(
-                "No additional details are available for ${med.brandName}.");
-          }
-        } else {
-          await _speak(
-              "Medication ${med.brandName} found. Generic name: ${med.genericName}.");
+        await _speak(
+            "Medication ${med.brandName} found. Its generic name is ${med.genericName}.");
+
+        // Show details if available
+        if (medicationDetails.containsKey(med.genericName)) {
+          final details = medicationDetails[med.genericName];
+          final usageInfo =
+              details['usage'] ?? 'No usage information available';
+          await _speak("Usage information: $usageInfo");
         }
-        break;
       }
     }
 
-    // If not found locally, search in the database if connected
+    // If not found locally, search the database
     if (!found && _isConnected) {
       try {
         await _mongoService.connect();
-        final result =
-            await _mongoService.searchMedicationByName(medicationName);
+        final result = await _mongoService.searchMedicationByName(query);
         await _mongoService.close();
+
         if (result != null) {
           found = true;
-          if (action.contains("read") ||
-              action.contains("what is") ||
-              action.contains("side effects")) {
-            await _speak(
-                "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
-            final details = await _mongoService
-                .fetchMedicationDetails(result['genericName']);
-            if (details != null) {
-              final usage =
-                  details['usage'] ?? 'No usage information available';
-              final sideEffects = details['sideEffects'] ??
-                  'No side effects information available';
-              await _speak("Usage: $usage. Side effects: $sideEffects.");
-            } else {
-              await _speak("No additional details available.");
-            }
-          } else {
-            await _speak(
-                "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
-          }
+          await _speak(
+              "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
         }
       } catch (e) {
-        debugPrint("Error searching database: $e");
+        debugPrint("Database search error: $e");
       }
     }
 
     if (!found) {
-      await _speak("No medication matching $medicationName was found.");
+      await _speak("No medication matching $query was found.");
     }
   }
 
@@ -685,11 +619,11 @@ class _EnhancedMedicationReaderScreenState
             const SizedBox(height: 16),
             Text(
               'Error occurred',
-              style: Theme.of(context).textTheme.headlineSmall,
+              style: TextStyle(fontSize: 24),
             ),
             const SizedBox(height: 8),
             Padding(
-              padding: const EdgeInsets.all(16.0),
+              padding: EdgeInsets.all(16.0),
               child: Text(errorMessage),
             ),
             ElevatedButton(
@@ -703,6 +637,7 @@ class _EnhancedMedicationReaderScreenState
 
     return Column(
       children: [
+        // Image preview
         Container(
           height: 150,
           width: double.infinity,
@@ -713,6 +648,7 @@ class _EnhancedMedicationReaderScreenState
             ),
           ),
         ),
+        // Main content
         Expanded(
           child: DefaultTabController(
             length: 3,
@@ -824,6 +760,227 @@ class _EnhancedMedicationReaderScreenState
     );
   }
 
+  Widget _buildMedicationDetailView(MedicationInfo medication) {
+  final hasDetails = medicationDetails.containsKey(medication.genericName);
+  final details = hasDetails ? medicationDetails[medication.genericName] : null;
+  
+  return SingleChildScrollView(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Medication header with image placeholder
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Theme.of(context).primaryColor, Theme.of(context).primaryColorLight],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.vertical(bottom: Radius.circular(16)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(Icons.medication, size: 40, color: Theme.of(context).primaryColor),
+              ),
+              SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      medication.brandName,
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
+                    ),
+                    Text(
+                      medication.genericName,
+                      style: TextStyle(fontSize: 16, color: Colors.white.withOpacity(0.9)),
+                    ),
+                    SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Icon(Icons.verified, size: 16, color: Colors.white70),
+                        SizedBox(width: 4),
+                        Text(
+                          'Confidence: ${(medication.confidence * 100).toStringAsFixed(1)}%',
+                          style: TextStyle(fontSize: 14, color: Colors.white70),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        
+        // Quick action buttons
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _actionButton(
+                icon: Icons.volume_up,
+                label: 'Read Info',
+                onTap: () => _readMedicationInfo(medication),
+              ),
+              _actionButton(
+                icon: Icons.save_alt,
+                label: 'Save to List',
+                onTap: () => _saveMedicationToPersonalList(medication),
+              ),
+              _actionButton(
+                icon: Icons.share,
+                label: 'Share',
+                onTap: () => _shareMedicationInfo(medication),
+              ),
+            ],
+          ),
+        ),
+        
+        // Medication details
+        if (hasDetails) ...[
+          _buildInfoSection('Usage Information', details['usage'] ?? 'Not available'),
+          _buildInfoSection('Side Effects', details['sideEffects'] ?? 'Not available'),
+          _buildInfoSection('Warnings', details['warnings'] ?? 'Not available'),
+          _buildInfoSection('Interactions', details['interactions'] ?? 'Not available'),
+          _buildInfoSection('Storage', details['storage'] ?? 'Keep in a cool, dry place away from direct sunlight.'),
+        ] else
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Center(
+              child: Column(
+                children: [
+                  Icon(Icons.info_outline, size: 48, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text(
+                    'No detailed information available',
+                    style: TextStyle(fontSize: 16),
+                  ),
+                  SizedBox(height: 8),
+                  if (_isConnected)
+                    OutlinedButton(
+                      onPressed: () => _fetchAdditionalMedicationInfo(medication),
+                      child: Text('Search Online'),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          
+        // Similar medications section
+        if (hasDetails && details.containsKey('similarMedications'))
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Similar Medications',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 8),
+                _buildSimilarMedicationsCarousel(details['similarMedications']),
+              ],
+            ),
+          ),
+          
+        SizedBox(height: 24),
+      ],
+    ),
+  );
+}
+
+// Helper methods for the detailed view
+Widget _buildInfoSection(String title, String content) {
+  return Card(
+    margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          SizedBox(height: 8),
+          Text(
+            content,
+            style: TextStyle(fontSize: 14),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Widget _actionButton({required IconData icon, required String label, required VoidCallback onTap}) {
+  return InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(8),
+    child: Container(
+      padding: EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+      child: Column(
+        children: [
+          Icon(icon, color: Theme.of(context).primaryColor),
+          SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(fontSize: 12),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Widget _buildSimilarMedicationsCarousel(List<dynamic> similarMeds) {
+  return Container(
+    height: 120,
+    child: ListView.builder(
+      scrollDirection: Axis.horizontal,
+      itemCount: similarMeds.length,
+      itemBuilder: (context, index) {
+        final med = similarMeds[index];
+        return Card(
+          margin: EdgeInsets.only(right: 12),
+          child: InkWell(
+            onTap: () => _viewSimilarMedication(med),
+            child: Container(
+              width: 100,
+              padding: EdgeInsets.all(12),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.medication, color: Theme.of(context).primaryColor),
+                  SizedBox(height: 8),
+                  Text(
+                    med['name'] ?? 'Unknown',
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    ),
+  );
+}
+
+
   Widget _buildTextTab() {
     return ListView(
       padding: const EdgeInsets.all(16.0),
@@ -929,8 +1086,10 @@ class _EnhancedMedicationReaderScreenState
                           ),
                         ),
                         IconButton(
-                          icon: Icon(_isListening ? Icons.mic : Icons.mic_none,
-                              color: _isListening ? Colors.red : Colors.blue),
+                          icon: Icon(
+                            _isListening ? Icons.mic : Icons.mic_none,
+                            color: _isListening ? Colors.red : Colors.blue,
+                          ),
                           onPressed: _toggleListening,
                         ),
                       ],
@@ -1024,7 +1183,293 @@ class _EnhancedMedicationReaderScreenState
     );
   }
 
+  void _processVoiceCommand(String command) async {
+    final lowerCommand = command.toLowerCase().trim();
+    // Regex for commands like "search ibuprofen", "read Tylenol", etc.
+    final RegExp commandRegex =
+        RegExp(r'^(search|read|what is|side effects of)\s+(.+)$');
+    final match = commandRegex.firstMatch(lowerCommand);
+    if (match != null) {
+      final action = match.group(1)!;
+      final medicationQuery = match.group(2)!;
+      final medicationName = StringUtils.toTitleCase(medicationQuery);
+      await _performMedicationQuery(action, medicationName);
+    } else {
+      await _speak(
+          "Command not recognized. Please try again with a valid phrase such as 'Search Lipitor' or 'What is Advil'.");
+    }
+  }
+
+  Future<void> _performMedicationQuery(
+      String action, String medicationName) async {
+    bool found = false;
+
+    // First, check in the already recognized medications
+    for (var med in recognizedMedications) {
+      if (med.brandName.toLowerCase() == medicationName.toLowerCase() ||
+          med.genericName.toLowerCase() == medicationName.toLowerCase()) {
+        found = true;
+        if (action.contains("read") ||
+            action.contains("what is") ||
+            action.contains("side effects")) {
+          await _speak(
+              "Medication ${med.brandName} found. Generic name is ${med.genericName}.");
+          if (medicationDetails.containsKey(med.genericName)) {
+            final details = medicationDetails[med.genericName];
+            final usageInfo =
+                details['usage'] ?? 'No usage information available';
+            final sideEffects = details['sideEffects'] ??
+                'No side effects information available';
+            await _speak("Usage: $usageInfo. Side effects: $sideEffects.");
+          } else {
+            await _speak(
+                "No additional details are available for ${med.brandName}.");
+          }
+        } else {
+          await _speak(
+              "Medication ${med.brandName} found. Generic name: ${med.genericName}.");
+        }
+        break;
+      }
+    }
+
+    // If not found locally, search in the database if connected
+    if (!found && _isConnected) {
+      try {
+        await _mongoService.connect();
+        final result =
+            await _mongoService.searchMedicationByName(medicationName);
+        await _mongoService.close();
+        if (result != null) {
+          found = true;
+          if (action.contains("read") ||
+              action.contains("what is") ||
+              action.contains("side effects")) {
+            await _speak(
+                "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
+            final details = await _mongoService
+                .fetchMedicationDetails(result['genericName']);
+            if (details != null) {
+              final usage =
+                  details['usage'] ?? 'No usage information available';
+              final sideEffects = details['sideEffects'] ??
+                  'No side effects information available';
+              await _speak("Usage: $usage. Side effects: $sideEffects.");
+            } else {
+              await _speak("No additional details available.");
+            }
+          } else {
+            await _speak(
+                "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
+          }
+        }
+      } catch (e) {
+        debugPrint("Error searching database: $e");
+      }
+    }
+
+    if (!found) {
+      await _speak("No medication matching $medicationName was found.");
+    }
+  }
+
+  Future<void> _searchByVoiceQuery() async {
+    if (_voiceSearchQuery.isEmpty) {
+      await _speak("Please say a medication name first.");
+      return;
+    }
+
+    final query = StringUtils.toTitleCase(_voiceSearchQuery);
+    bool found = false;
+
+    // First search in recognized medications
+    for (var med in recognizedMedications) {
+      if (med.brandName.contains(query) || med.genericName.contains(query)) {
+        found = true;
+        await _speak(
+            "Medication ${med.brandName} found. Its generic name is ${med.genericName}.");
+        if (medicationDetails.containsKey(med.genericName)) {
+          final details = medicationDetails[med.genericName];
+          final usageInfo =
+              details['usage'] ?? 'No usage information available';
+          await _speak("Usage information: $usageInfo");
+        }
+      }
+    }
+
+    // If not found in recognized medications, search the database
+    if (!found && _isConnected) {
+      try {
+        await _mongoService.connect();
+        final result = await _mongoService.searchMedicationByName(query);
+        await _mongoService.close();
+
+        if (result != null) {
+          found = true;
+          await _speak(
+              "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
+        }
+      } catch (e) {
+        debugPrint("Database search error: $e");
+      }
+    }
+
+    if (!found) {
+      await _speak("No medication matching $query was found.");
+    }
+  }
+
   void _navigateToCameraScreen(BuildContext context) async {
     Navigator.of(context).pop(); // Return to camera screen
+  }
+}
+
+// -------------------- Helper Classes -------------------- //
+
+class StringUtils {
+  static String toTitleCase(String input) {
+    final cleaned =
+        input.toLowerCase().replaceAll(RegExp(r'[^\w\s]'), '').trim();
+    if (cleaned.isEmpty) return cleaned;
+    return cleaned
+        .split(' ')
+        .map((word) =>
+            word.isNotEmpty ? word[0].toUpperCase() + word.substring(1) : '')
+        .join(' ');
+  }
+}
+
+class MedicationInfo {
+  final String brandName;
+  final String genericName;
+  final double confidence;
+  final String source; // 'database', 'nlp', or 'tflite'
+
+  MedicationInfo({
+    required this.brandName,
+    required this.genericName,
+    required this.confidence,
+    required this.source,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'brandName': brandName,
+      'genericName': genericName,
+      'confidence': confidence,
+      'source': source,
+    };
+  }
+
+  factory MedicationInfo.fromJson(Map<String, dynamic> json) {
+    return MedicationInfo(
+      brandName: json['brandName'] ?? '',
+      genericName: json['genericName'] ?? '',
+      confidence: json['confidence'] ?? 0.0,
+      source: json['source'] ?? '',
+    );
+  }
+}
+
+class MedicationCache {
+  static const String _cacheKey = 'medication_cache';
+  static const Duration _maxCacheAge = Duration(days: 30);
+  
+  static Future<void> cacheMedications(Map<String, dynamic> data) async {
+    final prefs = await SharedPreferences.getInstance();
+    final cacheData = {
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'data': data,
+    };
+    await prefs.setString(_cacheKey, jsonEncode(cacheData));
+  }
+  
+  static Future<Map<String, dynamic>?> getCachedMedications() async {
+    final prefs = await SharedPreferences.getInstance();
+    final cachedString = prefs.getString(_cacheKey);
+    
+    if (cachedString == null) return null;
+    
+    try {
+      final cacheData = jsonDecode(cachedString);
+      final timestamp = cacheData['timestamp'] as int;
+      final cacheAge = DateTime.now().millisecondsSinceEpoch - timestamp;
+      
+      // Check if cache is still valid
+      if (cacheAge < _maxCacheAge.inMilliseconds) {
+        return cacheData['data'];
+      }
+    } catch (e) {
+      debugPrint('Cache parsing error: $e');
+    }
+    
+    return null;
+  }
+  
+  static Future<void> invalidateCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_cacheKey);
+  }
+}
+
+class LazyMedicationDatabase {
+  static final LazyMedicationDatabase _instance = LazyMedicationDatabase._internal();
+  factory LazyMedicationDatabase() => _instance;
+  LazyMedicationDatabase._internal();
+  
+  Map<String, MedicationInfo>? _cachedMedications;
+  DateTime? _lastFetchTime;
+  bool _isLoading = false;
+  final _loadingCompleter = Completer<void>();
+  
+  Future<Map<String, MedicationInfo>> getMedications() async {
+    // Return cached data if available and fresh
+    if (_cachedMedications != null && 
+        _lastFetchTime != null && 
+        DateTime.now().difference(_lastFetchTime!) < Duration(hours: 12)) {
+      return _cachedMedications!;
+    }
+    
+    // Wait if already loading
+    if (_isLoading) {
+      await _loadingCompleter.future;
+      return _cachedMedications!;
+    }
+    
+    // Load data
+    _isLoading = true;
+    try {
+      final mongoService = MongoService();
+      await mongoService.connect();
+      final medicationData = await mongoService.fetchAllMedications();
+      await mongoService.close();
+      
+      // Convert to medication info objects
+      _cachedMedications = {};
+      for (final med in medicationData) {
+        final info = MedicationInfo.fromJson(med);
+        _cachedMedications![info.genericName.toLowerCase()] = info;
+      }
+      
+      _lastFetchTime = DateTime.now();
+      return _cachedMedications!;
+    } catch (e) {
+      debugPrint('Error loading medication database: $e');
+      // Try to load from cache as fallback
+      final cachedData = await MedicationCache.getCachedMedications();
+      if (cachedData != null) {
+        // Convert cached data to medication info objects
+        _cachedMedications = {};
+        for (final med in cachedData['medications']) {
+          final info = MedicationInfo.fromJson(med);
+          _cachedMedications![info.genericName.toLowerCase()] = info;
+        }
+        return _cachedMedications!;
+      }
+      return {};
+    } finally {
+      _isLoading = false;
+      _loadingCompleter.complete();
+    }
   }
 }
