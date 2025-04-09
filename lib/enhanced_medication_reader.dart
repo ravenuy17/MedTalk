@@ -500,28 +500,41 @@ class MedicationInfo {
 
   // -------------------- SPEECH RECOGNITION -------------------- //
 
-  Future<void> _toggleListening() async {
-    if (!_isListening) {
-      bool available = await _speech.initialize(
-        onStatus: (status) => debugPrint('onStatus: $status'),
-        onError: (error) => debugPrint('onError: $error'),
-      );
+Future<void> _toggleListening() async {
+  if (!_isListening) {
+    bool available = await _speech.initialize(
+      onStatus: (status) {
+        debugPrint('onStatus: $status');
+        // Optionally update _isListening when the status indicates the session ended.
+        if (status == 'notListening') {
+          setState(() => _isListening = false);
+        }
+      },
+      onError: (error) => debugPrint('onError: $error'),
+    );
 
-      if (available) {
-        setState(() => _isListening = true);
-        _speech.listen(
-          onResult: (val) {
-            setState(() {
-              _voiceSearchQuery = val.recognizedWords;
-            });
-          },
-        );
-      }
-    } else {
-      setState(() => _isListening = false);
-      _speech.stop();
+    if (available) {
+      setState(() {
+        _isListening = true;
+        _voiceSearchQuery = "";
+      });
+      _speech.listen(
+        onResult: (val) {
+          setState(() {
+            _voiceSearchQuery = val.recognizedWords;
+          });
+        },
+        // Automatically stop listening after 5 seconds.
+        listenFor: Duration(seconds: 5),
+      );
     }
+  } else {
+    setState(() => _isListening = false);
+    _speech.stop();
   }
+}
+
+
 
   Future<void> _searchByVoiceQuery() async {
     if (_voiceSearchQuery.isEmpty) {
@@ -1043,121 +1056,144 @@ Widget _buildSimilarMedicationsCarousel(List<dynamic> similarMeds) {
   }
 
   Widget _buildVoiceSearchTab() {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Card(
+  return Padding(
+    padding: const EdgeInsets.all(16.0),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header with status indicator
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Voice Search',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    Row(
+                      children: [
+                        Icon(
+                          _isListening ? Icons.mic : Icons.mic_off,
+                          color: _isListening ? Colors.red : Colors.grey,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          _isListening ? "Listening..." : "Not Listening",
+                          style: TextStyle(
+                            color: _isListening ? Colors.red : Colors.grey,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Say a medication name to search',
+                  style: TextStyle(color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 16),
+                // Text container that shows the voice query
+                Container(
+                  padding: const EdgeInsets.all(16.0),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[100],
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _voiceSearchQuery.isEmpty
+                              ? (_isListening ? "Listening..." : "Tap the mic to start")
+                              : _voiceSearchQuery,
+                          style: TextStyle(
+                            fontSize: 18,
+                            color: _voiceSearchQuery.isEmpty
+                                ? Colors.grey
+                                : Colors.black,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(
+                          _isListening ? Icons.mic : Icons.mic_none,
+                          color: _isListening ? Colors.red : Colors.blue,
+                        ),
+                        onPressed: _toggleListening,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.search),
+                    label: const Text('Search Medication'),
+                    onPressed: () {
+                      _processVoiceCommand(_voiceSearchQuery);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16.0),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Expanded(
+          child: Card(
             child: Padding(
               padding: const EdgeInsets.all(16.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+                children: const [
                   Text(
-                    'Voice Search',
-                    style: Theme.of(context).textTheme.titleLarge,
+                    'Voice Commands',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Say a medication name to search',
-                    style: TextStyle(color: Colors.grey[600]),
+                  SizedBox(height: 16),
+                  ListTile(
+                    leading: Icon(Icons.search),
+                    title: Text('Search [medication name]'),
+                    subtitle:
+                        Text('Search for information about a medication'),
                   ),
-                  const SizedBox(height: 16),
-                  Container(
-                    padding: const EdgeInsets.all(16.0),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[100],
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            _voiceSearchQuery.isEmpty
-                                ? 'Listening...'
-                                : _voiceSearchQuery,
-                            style: TextStyle(
-                              fontSize: 18,
-                              color: _voiceSearchQuery.isEmpty
-                                  ? Colors.grey
-                                  : Colors.black,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          icon: Icon(
-                            _isListening ? Icons.mic : Icons.mic_none,
-                            color: _isListening ? Colors.red : Colors.blue,
-                          ),
-                          onPressed: _toggleListening,
-                        ),
-                      ],
-                    ),
+                  ListTile(
+                    leading: Icon(Icons.volume_up),
+                    title: Text('Read [medication name]'),
+                    subtitle:
+                        Text('Read information about a specific medication'),
                   ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      icon: const Icon(Icons.search),
-                      label: const Text('Search Medication'),
-                      onPressed: () {
-                        _processVoiceCommand(_voiceSearchQuery);
-                      },
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16.0),
-                      ),
-                    ),
+                  ListTile(
+                    leading: Icon(Icons.help),
+                    title: Text('What is [medication name]'),
+                    subtitle:
+                        Text('Get detailed information about a medication'),
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.warning),
+                    title: Text('Side effects of [medication name]'),
+                    subtitle: Text('Learn about potential side effects'),
                   ),
                 ],
               ),
             ),
           ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Voice Commands',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 16),
-                    const ListTile(
-                      leading: Icon(Icons.search),
-                      title: Text('Search [medication name]'),
-                      subtitle:
-                          Text('Search for information about a medication'),
-                    ),
-                    const ListTile(
-                      leading: Icon(Icons.volume_up),
-                      title: Text('Read [medication name]'),
-                      subtitle:
-                          Text('Read information about a specific medication'),
-                    ),
-                    const ListTile(
-                      leading: Icon(Icons.help),
-                      title: Text('What is [medication name]'),
-                      subtitle:
-                          Text('Get detailed information about a medication'),
-                    ),
-                    const ListTile(
-                      leading: Icon(Icons.warning),
-                      title: Text('Side effects of [medication name]'),
-                      subtitle: Text('Learn about potential side effects'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+        ),
+      ],
+    ),
+  );
+}
 
   Widget _buildFloatingActionButton() {
     return Column(
