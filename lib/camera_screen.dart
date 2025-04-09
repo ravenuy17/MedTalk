@@ -85,14 +85,40 @@ class _CameraScreenState extends State<CameraScreen> {
       );
     }
 
+    final screenSize = MediaQuery.of(context).size;
+    final cameraAspectRatio = _controller!.value.aspectRatio;
+    final screenAspectRatio = screenSize.height / screenSize.width;
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Camera'),
-      ),
-      body: CameraPreview(_controller!),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _capturePhoto,
-        child: Icon(_isCapturing ? Icons.hourglass_bottom : Icons.camera),
+      body: Stack(
+          fit: StackFit.expand,
+            children: [
+              OverflowBox(
+                maxHeight: screenAspectRatio > cameraAspectRatio
+                    ? screenSize.height
+                    : screenSize.width / cameraAspectRatio,
+                maxWidth: screenAspectRatio > cameraAspectRatio
+                    ? screenSize.height * cameraAspectRatio
+                    : screenSize.width,
+                  child: CameraPreview(_controller!),
+                ),
+      Positioned(
+        bottom: 40,
+        left: 0,
+        right: 0,
+        child: Center(
+          child: FloatingActionButton(
+            onPressed: _capturePhoto,
+            backgroundColor: Colors.white,
+            foregroundColor: Colors.black,
+            child: Icon(
+              _isCapturing ? Icons.hourglass_bottom : Icons.camera_alt,
+              size: 30,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

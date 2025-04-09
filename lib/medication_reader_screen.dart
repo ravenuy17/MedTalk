@@ -274,85 +274,148 @@ class _MedicationReaderScreenState extends State<MedicationReaderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Medication Reader'),
+      automaticallyImplyLeading: false,
+      backgroundColor: const Color(0xFF1f4f89),
+      elevation: 0,
+      title: null,
+      leading: Padding(
+        padding: const EdgeInsets.all(8.0),
+        child: Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
+          ),
+          child: IconButton(
+            icon: const Icon(Icons.arrow_back, color: Color(0xFF1f4f89)),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ),
       ),
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
+    ),
+    body: isLoading
+        ? const Center(child: CircularProgressIndicator())
+        : Container(
+            color: const Color(0xFF1f4f89),
+            child: Column(
               children: [
                 Expanded(
-                  child: ListView(
-                    padding: const EdgeInsets.all(16.0),
-                    children: [
-                      Text(
-                        extractedText.isNotEmpty
-                            ? "Extracted Text (line by line):"
-                            : "No text recognized.",
-                        style: const TextStyle(fontSize: 16),
+                  child: Center(
+                    child: Container(
+                      margin: const EdgeInsets.all(16),
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black12,
+                            blurRadius: 8,
+                            offset: Offset(0, 4),
+                          )
+                        ],
                       ),
-                      const SizedBox(height: 8),
-                      // Display each line of the text, highlighting the current line.
-                      for (int i = 0; i < _lines.length; i++)
-                        Container(
-                          color: i == _currentLineIndex
-                              ? Colors.yellow.withOpacity(0.5)
-                              : Colors.transparent,
-                          padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: Text(_lines[i]),
-                        ),
-                      const SizedBox(height: 16),
-                      recognizedMedications.isNotEmpty
-                          ? Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  "Matched Medication(s):",
-                                  style: TextStyle(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold),
-                                ),
-                                const SizedBox(height: 8),
-                                for (final med in recognizedMedications)
-                                  ListTile(
-                                    leading: const Icon(Icons.medication),
-                                    title: Text(med),
-                                  ),
-                              ],
-                            )
-                          : const Text(
-                              "No matching medication found in the list.",
-                              style: TextStyle(fontSize: 16),
-                            ),
-                      const Divider(),
-                      // Voice search UI remains available.
-                      Text(
-                        "Voice Query: $_voiceSearchQuery",
-                        style: const TextStyle(fontSize: 16),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
+                      child: ListView(
+                        padding: const EdgeInsets.all(16.0),
                         children: [
-                          ElevatedButton.icon(
-                            onPressed: _toggleListening,
-                            icon:
-                                Icon(_isListening ? Icons.mic_off : Icons.mic),
-                            label: Text(_isListening
-                                ? "Stop Listening"
-                                : "Start Listening"),
+                          Text(
+                            extractedText.isNotEmpty
+                                ? "Extracted Text (line by line):"
+                                : "No text recognized.",
+                            style: const TextStyle(fontSize: 16),
                           ),
-                          const SizedBox(width: 16),
-                          ElevatedButton(
-                            onPressed: _searchByVoiceQuery,
-                            child: const Text("Search Medication"),
+                          const SizedBox(height: 8),
+                          for (int i = 0; i < _lines.length; i++)
+                            Container(
+                              color: i == _currentLineIndex
+                                  ? Colors.yellow.withOpacity(0.5)
+                                  : Colors.transparent,
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Text(_lines[i]),
+                            ),
+                          const SizedBox(height: 16),
+                          recognizedMedications.isNotEmpty
+                              ? Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text(
+                                      "Matched Medication(s):",
+                                      style: TextStyle(
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.bold),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    for (final med in recognizedMedications)
+                                      ListTile(
+                                        leading: const Icon(Icons.medication),
+                                        title: Text(med),
+                                      ),
+                                  ],
+                                )
+                              : const Text(
+                                  "No matching medication found in the list.",
+                                  style: TextStyle(fontSize: 16),
+                                ),
+                          const Divider(),
+                          Text(
+                            "Voice Query: $_voiceSearchQuery",
+                            style: const TextStyle(fontSize: 16),
+                          ),
+                          SizedBox(height: 10),
+                          Text(
+                            "Tap once to Start Listening"
+                          ),
+                          Text(
+                            "Double Tap once to Listen Again"
                           ),
                         ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
-                // The "READ ALL TEXT" button has been removed so that the app reads automatically.
-              ],
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 32.0, vertical: 24),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      GestureDetector(
+                        onTap: _toggleListening,
+                        child: Container(
+                          height: 150,
+                          width: 100,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20)
+                          ),
+                          child: Icon(
+                            Icons.hearing,
+                            size: 48,
+                            color: Colors.black,
+                          ),
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: _searchByVoiceQuery,
+                        child: Container(
+                          height: 150,
+                          width: 100,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Icon(
+                            Icons.search,
+                            size: 48,
+                            color: Colors.black,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
+          ],
+        ),
+      ),
     );
   }
 }
