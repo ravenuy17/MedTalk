@@ -10,6 +10,19 @@ class MongoService {
   static const String _collectionName = 'medications';
   static const String _userHistoryCollection = 'user_history';
 
+  // Fetch all medications from the collection
+  Future<List<Map<String, dynamic>>> fetchAllMedications() async {
+    try {
+      final collection = _db!.collection(_collectionName);
+      final List<Map<String, dynamic>> results =
+          await collection.find().toList();
+      return results;
+    } catch (e) {
+      print('Error fetching all medications: $e');
+      return [];
+    }
+  }
+
   // Connect to MongoDB
   Future<void> connect() async {
     try {
