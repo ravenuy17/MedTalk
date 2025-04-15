@@ -9,7 +9,7 @@ import 'package:camera/camera.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'services/mongo_service.dart'; // Ensure this file exists in your services folder
+import '../services/mongo_service.dart'; // Ensure this file exists in your services folder
 
 class EnhancedMedicationReaderScreen extends StatefulWidget {
   final String imagePath;

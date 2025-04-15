@@ -1,7 +1,9 @@
 // lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'camera_screen.dart';
+import 'package:flutter_application_1/pages/login_or_register_screen.dart';
+import 'package:flutter_application_1/pages/login_screen.dart';
+import 'pages/camera_screen.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -20,6 +22,7 @@ class MyApp extends StatelessWidget {
       title: 'Medication Scanner',
       theme: ThemeData(primarySwatch: Colors.blue),
       home: CameraScreen(cameras: cameras),
+      //home: LoginOrRegisterScreen(),
     );
   }
 }
