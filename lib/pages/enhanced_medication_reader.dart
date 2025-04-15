@@ -1,5 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+import 'dart:math' show log, min;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -9,7 +13,7 @@ import 'package:camera/camera.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../services/mongo_service.dart'; // Ensure this file exists in your services folder
+import '../services/mongo_service.dart'; // Ensure your MongoService defines the methods used below
 
 class EnhancedMedicationReaderScreen extends StatefulWidget {
   final String imagePath;
@@ -63,6 +67,13 @@ class _EnhancedMedicationReaderScreenState
   // Classification confidence threshold
   final double _confidenceThreshold = 0.70;
 
+  // Parameters for TFLite (set these according to your model specifications)
+  final int _maxSequenceLength = 128;
+  final int _strideLength = 64;
+  final int _numMedicationClasses = 10;
+  // This placeholder holds text spans from the original text
+  final Map<int, String> _originalTextSpans = {};
+
   @override
   void initState() {
     super.initState();
@@ -73,7 +84,7 @@ class _EnhancedMedicationReaderScreenState
     try {
       // Initialize ML Kit components
       _textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
-      // NOTE: Use annotateText instead of extractEntities
+      // NOTE: Using annotateText per updated API
       _entityExtractor =
           EntityExtractor(language: EntityExtractorLanguage.english);
 
@@ -115,13 +126,12 @@ class _EnhancedMedicationReaderScreenState
 
   Future<void> _loadTFLiteModel() async {
     try {
-      // Load TFLite model for additional medication classification
       _tfliteInterpreter = await Interpreter.fromAsset(
           'assets/models/medication_classifier.tflite');
       debugPrint("TFLite model loaded successfully");
     } catch (e) {
       debugPrint("Failed to load TFLite model: $e");
-      // Continue without TFLite model - we'll fall back to dictionary-based matching
+      // Continue without TFLite model (will fall back to dictionary-based matching)
     }
   }
 
@@ -131,7 +141,7 @@ class _EnhancedMedicationReaderScreenState
     await flutterTts.setVolume(1.0);
     await flutterTts.setPitch(1.0);
 
-    // Handler to move to the next line when TTS finishes speaking
+    // When TTS finishes speaking a line, move to the next one if reading all text
     flutterTts.setCompletionHandler(() {
       if (_isReadingAll) {
         _currentLineIndex++;
@@ -170,10 +180,9 @@ class _EnhancedMedicationReaderScreenState
 
       debugPrint("OCR extracted ${_lines.length} lines of text");
 
-      // Extract structured text blocks for better context
+      // Process text blocks for entity extraction
       for (var textBlock in recognizedText.blocks) {
         for (var line in textBlock.lines) {
-          // Process each line for entity extraction using the updated API
           await _extractEntitiesFromText(line.text);
         }
       }
@@ -183,18 +192,15 @@ class _EnhancedMedicationReaderScreenState
   }
 
   Future<void> _extractEntitiesFromText(String text) async {
-    // Use annotateText instead of extractEntities per updated API
     final List<EntityAnnotation> annotations =
         await _entityExtractor.annotateText(text);
 
     for (final entity in annotations) {
       if (entity.entities.isNotEmpty) {
         for (final entityType in entity.entities) {
-          // Focus on medication-related entities (this example uses a few types)
           if (entityType.type == EntityType.address ||
-              entityType.type == EntityType.quantity ||
-              entityType.type == EntityType.date) {
-            // Store these keywords for context
+              entityType.type == EntityType.money ||
+              entityType.type == EntityType.dateTime) {
             _processedKeywords.add(entity.text);
           }
         }
@@ -206,7 +212,6 @@ class _EnhancedMedicationReaderScreenState
 
   Future<Map<String, String>> _loadMedicationMap() async {
     if (!_isConnected) {
-      // Fall back to cached data if available
       return MongoService.getCachedMedications();
     }
 
@@ -217,7 +222,6 @@ class _EnhancedMedicationReaderScreenState
       return brandToGenericName;
     } catch (e) {
       debugPrint("Failed to load medication map: $e");
-      // Fall back to cached data
       return MongoService.getCachedMedications();
     }
   }
@@ -226,7 +230,7 @@ class _EnhancedMedicationReaderScreenState
     setState(() => isProcessing = true);
 
     try {
-      // Perform OCR on the image
+      // Perform OCR
       await _performOCR();
       if (extractedText.isEmpty)
         throw Exception("No text extracted from image");
@@ -234,7 +238,7 @@ class _EnhancedMedicationReaderScreenState
       // Load medication dictionary
       final medicationMap = await _loadMedicationMap();
 
-      // Use multiple approaches to identify medications
+      // Identify medications via various approaches
       List<MedicationInfo> dictionaryMatches =
           _extractMedicationsFromDictionary(extractedText, medicationMap);
       List<MedicationInfo> nlpMatches =
@@ -242,21 +246,18 @@ class _EnhancedMedicationReaderScreenState
       List<MedicationInfo> tfliteMatches =
           await _performTFLiteClassification(extractedText);
 
-      // Combine and deduplicate results, prioritizing higher confidence matches
+      // Combine and deduplicate results
       setState(() {
         recognizedMedications = _combineAndDeduplicateResults(
-          dictionaryMatches,
-          nlpMatches,
-          tfliteMatches,
-        );
+            dictionaryMatches, nlpMatches, tfliteMatches);
       });
 
-      // Fetch additional details for recognized medications
+      // Fetch additional details if any medications were found
       if (recognizedMedications.isNotEmpty) {
         await _fetchMedicationDetails();
       }
 
-      // Store extracted data in MongoDB if connected
+      // Store the extracted data if connected
       if (_isConnected) {
         try {
           await _mongoService.connect();
@@ -286,7 +287,6 @@ class _EnhancedMedicationReaderScreenState
         await _speak("No matching medications found.");
       }
 
-      // Automatically read the text if enabled
       if (widget.autoRead && _lines.isNotEmpty) {
         await _readAllText();
       }
@@ -325,150 +325,166 @@ class _EnhancedMedicationReaderScreenState
     return foundMedications;
   }
 
-  // Replace the current TFLite implementation with this more robust approach
-Future<List<MedicationInfo>> _performTFLiteClassification(String text) async {
-  final foundMedications = <MedicationInfo>[];
-  
-  try {
-    if (_tfliteInterpreter == null) return [];
-    
-    // Use BertTokenizer-style approach for better text encoding
-    final encodedText = await _encodeTextForBert(text);
-    
-    // Process with sliding window to handle longer texts
-    List<MedicationInfo> allPredictions = [];
-    for (int i = 0; i < encodedText.length - _maxSequenceLength + 1; i += _strideLength) {
-      final inputSequence = encodedText.sublist(
-          i, min(i + _maxSequenceLength, encodedText.length));
-      
-      // Pad sequence if needed
-      final paddedSequence = _padSequence(inputSequence, _maxSequenceLength);
-      
-      // Create input tensor shape expected by the model (batch_size=1, seq_length)
-      final inputShape = [1, _maxSequenceLength];
-      final input = [paddedSequence];
-      
-      // Define output tensors
-      // Assuming model outputs [1, num_classes] for classification scores
-      final outputShape = [1, _numMedicationClasses];
-      final output = List.generate(
-          outputShape[0], (_) => List<double>.filled(outputShape[1], 0));
-      
-      // Run inference
-      _tfliteInterpreter!.runForMultipleInputs([input], [output]);
-      
-      // Process results (find medications above threshold)
-      final predictions = _processClassificationResults(output[0], i);
-      allPredictions.addAll(predictions);
-    }
-    
-    // Group and deduplicate predicted medications
-    foundMedications.addAll(_consolidatePredictions(allPredictions));
-    
-  } catch (e) {
-    debugPrint("TFLite classification error: $e");
+  Future<List<MedicationInfo>> _performNLPExtraction(String text) async {
+    // TODO: Insert your NLP extraction logic here.
+    return [];
   }
-  
-  return foundMedications;
-}
 
-// Process classification results with span information
-List<MedicationInfo> _processClassificationResults(
-    List<double> scores, int startPosition) {
-  final results = <MedicationInfo>[];
-  
-  // Map from classification index to medication info
-  final medicationDatabase = await _loadMedicationDatabase();
-  
-  for (int i = 0; i < scores.length; i++) {
-    if (scores[i] > _confidenceThreshold) {
-      // Look up medication info from our database
-      if (medicationDatabase.containsKey(i)) {
-        final medInfo = medicationDatabase[i]!;
-        results.add(MedicationInfo(
-          brandName: medInfo.brandName,
-          genericName: medInfo.genericName,
-          confidence: scores[i],
-          source: "tflite",
-          // Store metadata about where in text this was found
-          metadata: {
-            'startPosition': startPosition,
-            'textSpan': _originalTextSpans[startPosition],
-          }
-        ));
+  Future<List<MedicationInfo>> _performTFLiteClassification(String text) async {
+    final foundMedications = <MedicationInfo>[];
+
+    try {
+      if (_tfliteInterpreter == null) return [];
+
+      final encodedText = await _encodeTextForBert(text);
+
+      List<MedicationInfo> allPredictions = [];
+      for (int i = 0;
+          i < encodedText.length - _maxSequenceLength + 1;
+          i += _strideLength) {
+        final inputSequence = encodedText.sublist(
+            i, min(i + _maxSequenceLength, encodedText.length));
+        final paddedSequence = _padSequence(inputSequence, _maxSequenceLength);
+
+        // Create input tensor (shape: [1, _maxSequenceLength])
+        final input = [paddedSequence];
+
+        // Define output tensor (expected output shape: [1, _numMedicationClasses])
+        final output = List.generate(
+            1, (_) => List<double>.filled(_numMedicationClasses, 0));
+
+        // Create a map for the outputs with index 0 pointing to your output tensor
+        final outputsMap = {0: output};
+        _tfliteInterpreter!.runForMultipleInputs([input], outputsMap);
+
+        final predictions = await _processClassificationResults(output[0], i);
+        allPredictions.addAll(predictions);
+      }
+
+      foundMedications.addAll(_consolidatePredictions(allPredictions));
+    } catch (e) {
+      debugPrint("TFLite classification error: $e");
+    }
+
+    return foundMedications;
+  }
+
+  Future<List<MedicationInfo>> _processClassificationResults(
+      List<double> scores, int startPosition) async {
+    final results = <MedicationInfo>[];
+
+    // Get medication info from your database via LazyMedicationDatabase
+    final medicationDatabase = await LazyMedicationDatabase().getMedications();
+
+    for (int i = 0; i < scores.length; i++) {
+      if (scores[i] > _confidenceThreshold) {
+        // Assume your medicationDatabase keys are strings; adjust as needed
+        if (medicationDatabase.containsKey(i.toString())) {
+          final medInfo = medicationDatabase[i.toString()]!;
+          results.add(MedicationInfo(
+            brandName: medInfo.brandName,
+            genericName: medInfo.genericName,
+            confidence: scores[i],
+            source: "tflite",
+            metadata: {
+              'startPosition': startPosition,
+              'textSpan': _originalTextSpans[startPosition],
+            },
+          ));
+        }
       }
     }
-  }
-  
-  return results;
-}
 
-// Consolidate predictions by grouping similar medications
-List<MedicationInfo> _consolidatePredictions(List<MedicationInfo> predictions) {
-  // Group by generic name
-  final Map<String, List<MedicationInfo>> grouped = {};
-  
-  for (final pred in predictions) {
-    final key = pred.genericName.toLowerCase();
-    grouped[key] = grouped[key] ?? [];
-    grouped[key]!.add(pred);
+    return results;
   }
-  
-  // For each group, use a weighted confidence approach
-  final result = <MedicationInfo>[];
-  grouped.forEach((key, meds) {
-    // Sort by confidence
-    meds.sort((a, b) => b.confidence.compareTo(a.confidence));
-    
-    // Use the highest confidence medication but boost confidence if 
-    // multiple instances were found
-    final highestConfMed = meds.first;
-    double adjustedConfidence = highestConfMed.confidence;
-    
-    // Boost confidence if multiple detections
-    if (meds.length > 1) {
-      // Logarithmic scaling to avoid too high confidence
-      adjustedConfidence = min(
-        0.99, 
-        highestConfMed.confidence + 0.1 * log(meds.length)
-      );
+
+  List<MedicationInfo> _consolidatePredictions(
+      List<MedicationInfo> predictions) {
+    final Map<String, List<MedicationInfo>> grouped = {};
+
+    for (final pred in predictions) {
+      final key = pred.genericName.toLowerCase();
+      grouped[key] = grouped[key] ?? [];
+      grouped[key]!.add(pred);
     }
-    
-    result.add(MedicationInfo(
-      brandName: highestConfMed.brandName,
-      genericName: highestConfMed.genericName,
-      confidence: adjustedConfidence,
-      source: "tflite+ensemble",
-      metadata: {
-        'occurrences': meds.length,
-        'textSpans': meds.map((m) => m.metadata?['textSpan']).toList(),
+
+    final result = <MedicationInfo>[];
+    grouped.forEach((key, meds) {
+      meds.sort((a, b) => b.confidence.compareTo(a.confidence));
+      final highestConfMed = meds.first;
+      double adjustedConfidence = highestConfMed.confidence;
+
+      if (meds.length > 1) {
+        adjustedConfidence =
+            min(0.99, highestConfMed.confidence + 0.1 * log(meds.length));
       }
-    ));
-  });
-  
-  return result;
-}
 
-// Updated MedicationInfo class to include metadata
-class MedicationInfo {
-  final String brandName;
-  final String genericName;
-  final double confidence;
-  final String source;
-  final Map<String, dynamic>? metadata;
+      result.add(MedicationInfo(
+        brandName: highestConfMed.brandName,
+        genericName: highestConfMed.genericName,
+        confidence: adjustedConfidence,
+        source: "tflite+ensemble",
+        metadata: {
+          'occurrences': meds.length,
+          'textSpans': meds.map((m) => m.metadata?['textSpan']).toList(),
+        },
+      ));
+    });
 
-  MedicationInfo({
-    required this.brandName,
-    required this.genericName,
-    required this.confidence,
-    required this.source,
-    this.metadata,
-  });
-  
-  // Rest of the class remains the same
-}
+    return result;
+  }
 
-  // -------------------- TTS HELPERS -------------------- //
+  Future<List<int>> _encodeTextForBert(String text) async {
+    // Dummy implementation: returns the code units.
+    return text.codeUnits;
+  }
+
+  List<int> _padSequence(List<int> sequence, int maxLength) {
+    final padded = List<int>.from(sequence);
+    while (padded.length < maxLength) {
+      padded.add(0);
+    }
+    return padded;
+  }
+
+  // -------------------- New Helper Methods -------------------- //
+
+  List<MedicationInfo> _combineAndDeduplicateResults(
+      List<MedicationInfo> dictionaryMatches,
+      List<MedicationInfo> nlpMatches,
+      List<MedicationInfo> tfliteMatches) {
+    List<MedicationInfo> allMatches = [];
+    allMatches.addAll(dictionaryMatches);
+    allMatches.addAll(nlpMatches);
+    allMatches.addAll(tfliteMatches);
+
+    // Deduplicate by generic name, keeping the highest-confidence detection.
+    Map<String, MedicationInfo> deduped = {};
+    for (final med in allMatches) {
+      final key = med.genericName.toLowerCase();
+      if (deduped.containsKey(key)) {
+        if (med.confidence > deduped[key]!.confidence) {
+          deduped[key] = med;
+        }
+      } else {
+        deduped[key] = med;
+      }
+    }
+    return deduped.values.toList();
+  }
+
+  Future<void> _fetchMedicationDetails() async {
+    // Dummy implementation: Replace with your actual API/database calls.
+    for (final med in recognizedMedications) {
+      medicationDetails[med.genericName] = {
+        'usage': 'Usage details for ${med.genericName}.',
+        'sideEffects': 'Side effects for ${med.genericName}.',
+        'warnings': 'Warnings for ${med.genericName}.'
+      };
+    }
+  }
+
+  // -------------------- TTS Helpers -------------------- //
 
   Future<void> _speak(String message) async {
     try {
@@ -498,43 +514,39 @@ class MedicationInfo {
     await _speakLine(_currentLineIndex);
   }
 
-  // -------------------- SPEECH RECOGNITION -------------------- //
+  // -------------------- Speech Recognition -------------------- //
 
-Future<void> _toggleListening() async {
-  if (!_isListening) {
-    bool available = await _speech.initialize(
-      onStatus: (status) {
-        debugPrint('onStatus: $status');
-        // Optionally update _isListening when the status indicates the session ended.
-        if (status == 'notListening') {
-          setState(() => _isListening = false);
-        }
-      },
-      onError: (error) => debugPrint('onError: $error'),
-    );
-
-    if (available) {
-      setState(() {
-        _isListening = true;
-        _voiceSearchQuery = "";
-      });
-      _speech.listen(
-        onResult: (val) {
-          setState(() {
-            _voiceSearchQuery = val.recognizedWords;
-          });
+  Future<void> _toggleListening() async {
+    if (!_isListening) {
+      bool available = await _speech.initialize(
+        onStatus: (status) {
+          debugPrint('onStatus: $status');
+          if (status == 'notListening') {
+            setState(() => _isListening = false);
+          }
         },
-        // Automatically stop listening after 5 seconds.
-        listenFor: Duration(seconds: 5),
+        onError: (error) => debugPrint('onError: $error'),
       );
+
+      if (available) {
+        setState(() {
+          _isListening = true;
+          _voiceSearchQuery = "";
+        });
+        _speech.listen(
+          onResult: (val) {
+            setState(() {
+              _voiceSearchQuery = val.recognizedWords;
+            });
+          },
+          listenFor: Duration(seconds: 5),
+        );
+      }
+    } else {
+      setState(() => _isListening = false);
+      _speech.stop();
     }
-  } else {
-    setState(() => _isListening = false);
-    _speech.stop();
   }
-}
-
-
 
   Future<void> _searchByVoiceQuery() async {
     if (_voiceSearchQuery.isEmpty) {
@@ -545,14 +557,11 @@ Future<void> _toggleListening() async {
     final query = StringUtils.toTitleCase(_voiceSearchQuery);
     bool found = false;
 
-    // First, search in recognized medications
     for (var med in recognizedMedications) {
       if (med.brandName.contains(query) || med.genericName.contains(query)) {
         found = true;
         await _speak(
             "Medication ${med.brandName} found. Its generic name is ${med.genericName}.");
-
-        // Show details if available
         if (medicationDetails.containsKey(med.genericName)) {
           final details = medicationDetails[med.genericName];
           final usageInfo =
@@ -562,7 +571,6 @@ Future<void> _toggleListening() async {
       }
     }
 
-    // If not found locally, search the database
     if (!found && _isConnected) {
       try {
         await _mongoService.connect();
@@ -582,6 +590,97 @@ Future<void> _toggleListening() async {
     if (!found) {
       await _speak("No medication matching $query was found.");
     }
+  }
+
+  void _processVoiceCommand(String command) async {
+    final lowerCommand = command.toLowerCase().trim();
+    final RegExp commandRegex =
+        RegExp(r'^(search|read|what is|side effects of)\s+(.+)$');
+    final match = commandRegex.firstMatch(lowerCommand);
+    if (match != null) {
+      final action = match.group(1)!;
+      final medicationQuery = match.group(2)!;
+      final medicationName = StringUtils.toTitleCase(medicationQuery);
+      await _performMedicationQuery(action, medicationName);
+    } else {
+      await _speak(
+          "Command not recognized. Please try again with a valid phrase such as 'Search Lipitor' or 'What is Advil'.");
+    }
+  }
+
+  Future<void> _performMedicationQuery(
+      String action, String medicationName) async {
+    bool found = false;
+
+    for (var med in recognizedMedications) {
+      if (med.brandName.toLowerCase() == medicationName.toLowerCase() ||
+          med.genericName.toLowerCase() == medicationName.toLowerCase()) {
+        found = true;
+        if (action.contains("read") ||
+            action.contains("what is") ||
+            action.contains("side effects")) {
+          await _speak(
+              "Medication ${med.brandName} found. Generic name is ${med.genericName}.");
+          if (medicationDetails.containsKey(med.genericName)) {
+            final details = medicationDetails[med.genericName];
+            final usageInfo =
+                details['usage'] ?? 'No usage information available';
+            final sideEffects = details['sideEffects'] ??
+                'No side effects information available';
+            await _speak("Usage: $usageInfo. Side effects: $sideEffects.");
+          } else {
+            await _speak(
+                "No additional details are available for ${med.brandName}.");
+          }
+        } else {
+          await _speak(
+              "Medication ${med.brandName} found. Generic name: ${med.genericName}.");
+        }
+        break;
+      }
+    }
+
+    if (!found && _isConnected) {
+      try {
+        await _mongoService.connect();
+        final result =
+            await _mongoService.searchMedicationByName(medicationName);
+        await _mongoService.close();
+        if (result != null) {
+          found = true;
+          if (action.contains("read") ||
+              action.contains("what is") ||
+              action.contains("side effects")) {
+            await _speak(
+                "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
+            final details = await _mongoService
+                .fetchMedicationDetails(result['genericName']);
+            if (details != null) {
+              final usage =
+                  details['usage'] ?? 'No usage information available';
+              final sideEffects = details['sideEffects'] ??
+                  'No side effects information available';
+              await _speak("Usage: $usage. Side effects: $sideEffects.");
+            } else {
+              await _speak("No additional details available.");
+            }
+          } else {
+            await _speak(
+                "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
+          }
+        }
+      } catch (e) {
+        debugPrint("Error searching database: $e");
+      }
+    }
+
+    if (!found) {
+      await _speak("No medication matching $medicationName was found.");
+    }
+  }
+
+  void _navigateToCameraScreen(BuildContext context) async {
+    Navigator.of(context).pop();
   }
 
   // -------------------- UI -------------------- //
@@ -650,7 +749,6 @@ Future<void> _toggleListening() async {
 
     return Column(
       children: [
-        // Image preview
         Container(
           height: 150,
           width: double.infinity,
@@ -661,7 +759,6 @@ Future<void> _toggleListening() async {
             ),
           ),
         ),
-        // Main content
         Expanded(
           child: DefaultTabController(
             length: 3,
@@ -773,227 +870,6 @@ Future<void> _toggleListening() async {
     );
   }
 
-  Widget _buildMedicationDetailView(MedicationInfo medication) {
-  final hasDetails = medicationDetails.containsKey(medication.genericName);
-  final details = hasDetails ? medicationDetails[medication.genericName] : null;
-  
-  return SingleChildScrollView(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Medication header with image placeholder
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Theme.of(context).primaryColor, Theme.of(context).primaryColorLight],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.vertical(bottom: Radius.circular(16)),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 80,
-                height: 80,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(Icons.medication, size: 40, color: Theme.of(context).primaryColor),
-              ),
-              SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      medication.brandName,
-                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
-                    ),
-                    Text(
-                      medication.genericName,
-                      style: TextStyle(fontSize: 16, color: Colors.white.withOpacity(0.9)),
-                    ),
-                    SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Icon(Icons.verified, size: 16, color: Colors.white70),
-                        SizedBox(width: 4),
-                        Text(
-                          'Confidence: ${(medication.confidence * 100).toStringAsFixed(1)}%',
-                          style: TextStyle(fontSize: 14, color: Colors.white70),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        
-        // Quick action buttons
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _actionButton(
-                icon: Icons.volume_up,
-                label: 'Read Info',
-                onTap: () => _readMedicationInfo(medication),
-              ),
-              _actionButton(
-                icon: Icons.save_alt,
-                label: 'Save to List',
-                onTap: () => _saveMedicationToPersonalList(medication),
-              ),
-              _actionButton(
-                icon: Icons.share,
-                label: 'Share',
-                onTap: () => _shareMedicationInfo(medication),
-              ),
-            ],
-          ),
-        ),
-        
-        // Medication details
-        if (hasDetails) ...[
-          _buildInfoSection('Usage Information', details['usage'] ?? 'Not available'),
-          _buildInfoSection('Side Effects', details['sideEffects'] ?? 'Not available'),
-          _buildInfoSection('Warnings', details['warnings'] ?? 'Not available'),
-          _buildInfoSection('Interactions', details['interactions'] ?? 'Not available'),
-          _buildInfoSection('Storage', details['storage'] ?? 'Keep in a cool, dry place away from direct sunlight.'),
-        ] else
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Center(
-              child: Column(
-                children: [
-                  Icon(Icons.info_outline, size: 48, color: Colors.grey),
-                  SizedBox(height: 16),
-                  Text(
-                    'No detailed information available',
-                    style: TextStyle(fontSize: 16),
-                  ),
-                  SizedBox(height: 8),
-                  if (_isConnected)
-                    OutlinedButton(
-                      onPressed: () => _fetchAdditionalMedicationInfo(medication),
-                      child: Text('Search Online'),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          
-        // Similar medications section
-        if (hasDetails && details.containsKey('similarMedications'))
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Similar Medications',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                SizedBox(height: 8),
-                _buildSimilarMedicationsCarousel(details['similarMedications']),
-              ],
-            ),
-          ),
-          
-        SizedBox(height: 24),
-      ],
-    ),
-  );
-}
-
-// Helper methods for the detailed view
-Widget _buildInfoSection(String title, String content) {
-  return Card(
-    margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-    child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          SizedBox(height: 8),
-          Text(
-            content,
-            style: TextStyle(fontSize: 14),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-Widget _actionButton({required IconData icon, required String label, required VoidCallback onTap}) {
-  return InkWell(
-    onTap: onTap,
-    borderRadius: BorderRadius.circular(8),
-    child: Container(
-      padding: EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-      child: Column(
-        children: [
-          Icon(icon, color: Theme.of(context).primaryColor),
-          SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(fontSize: 12),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-Widget _buildSimilarMedicationsCarousel(List<dynamic> similarMeds) {
-  return Container(
-    height: 120,
-    child: ListView.builder(
-      scrollDirection: Axis.horizontal,
-      itemCount: similarMeds.length,
-      itemBuilder: (context, index) {
-        final med = similarMeds[index];
-        return Card(
-          margin: EdgeInsets.only(right: 12),
-          child: InkWell(
-            onTap: () => _viewSimilarMedication(med),
-            child: Container(
-              width: 100,
-              padding: EdgeInsets.all(12),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.medication, color: Theme.of(context).primaryColor),
-                  SizedBox(height: 8),
-                  Text(
-                    med['name'] ?? 'Unknown',
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    ),
-  );
-}
-
-
   Widget _buildTextTab() {
     return ListView(
       padding: const EdgeInsets.all(16.0),
@@ -1056,144 +932,143 @@ Widget _buildSimilarMedicationsCarousel(List<dynamic> similarMeds) {
   }
 
   Widget _buildVoiceSearchTab() {
-  return Padding(
-    padding: const EdgeInsets.all(16.0),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Header with status indicator
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Voice Search',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    Row(
-                      children: [
-                        Icon(
-                          _isListening ? Icons.mic : Icons.mic_off,
-                          color: _isListening ? Colors.red : Colors.grey,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          _isListening ? "Listening..." : "Not Listening",
-                          style: TextStyle(
-                            color: _isListening ? Colors.red : Colors.grey,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Say a medication name to search',
-                  style: TextStyle(color: Colors.grey[600]),
-                ),
-                const SizedBox(height: 16),
-                // Text container that shows the voice query
-                Container(
-                  padding: const EdgeInsets.all(16.0),
-                  decoration: BoxDecoration(
-                    color: Colors.grey[100],
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _voiceSearchQuery.isEmpty
-                              ? (_isListening ? "Listening..." : "Tap the mic to start")
-                              : _voiceSearchQuery,
-                          style: TextStyle(
-                            fontSize: 18,
-                            color: _voiceSearchQuery.isEmpty
-                                ? Colors.grey
-                                : Colors.black,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        icon: Icon(
-                          _isListening ? Icons.mic : Icons.mic_none,
-                          color: _isListening ? Colors.red : Colors.blue,
-                        ),
-                        onPressed: _toggleListening,
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    icon: const Icon(Icons.search),
-                    label: const Text('Search Medication'),
-                    onPressed: () {
-                      _processVoiceCommand(_voiceSearchQuery);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16.0),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        Expanded(
-          child: Card(
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Card(
             child: Padding(
               padding: const EdgeInsets.all(16.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Voice Search',
+                          style: Theme.of(context).textTheme.titleLarge),
+                      Row(
+                        children: [
+                          Icon(
+                            _isListening ? Icons.mic : Icons.mic_off,
+                            color: _isListening ? Colors.red : Colors.grey,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            _isListening ? "Listening..." : "Not Listening",
+                            style: TextStyle(
+                              color: _isListening ? Colors.red : Colors.grey,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
                   Text(
-                    'Voice Commands',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    'Say a medication name to search',
+                    style: TextStyle(color: Colors.grey[600]),
                   ),
-                  SizedBox(height: 16),
-                  ListTile(
-                    leading: Icon(Icons.search),
-                    title: Text('Search [medication name]'),
-                    subtitle:
-                        Text('Search for information about a medication'),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(16.0),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[100],
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _voiceSearchQuery.isEmpty
+                                ? (_isListening
+                                    ? "Listening..."
+                                    : "Tap the mic to start")
+                                : _voiceSearchQuery,
+                            style: TextStyle(
+                              fontSize: 18,
+                              color: _voiceSearchQuery.isEmpty
+                                  ? Colors.grey
+                                  : Colors.black,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(
+                            _isListening ? Icons.mic : Icons.mic_none,
+                            color: _isListening ? Colors.red : Colors.blue,
+                          ),
+                          onPressed: _toggleListening,
+                        ),
+                      ],
+                    ),
                   ),
-                  ListTile(
-                    leading: Icon(Icons.volume_up),
-                    title: Text('Read [medication name]'),
-                    subtitle:
-                        Text('Read information about a specific medication'),
-                  ),
-                  ListTile(
-                    leading: Icon(Icons.help),
-                    title: Text('What is [medication name]'),
-                    subtitle:
-                        Text('Get detailed information about a medication'),
-                  ),
-                  ListTile(
-                    leading: Icon(Icons.warning),
-                    title: Text('Side effects of [medication name]'),
-                    subtitle: Text('Learn about potential side effects'),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      icon: const Icon(Icons.search),
+                      label: const Text('Search Medication'),
+                      onPressed: () {
+                        _processVoiceCommand(_voiceSearchQuery);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16.0),
+                      ),
+                    ),
                   ),
                 ],
               ),
             ),
           ),
-        ),
-      ],
-    ),
-  );
-}
+          const SizedBox(height: 16),
+          Expanded(
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: const [
+                    Text(
+                      'Voice Commands',
+                      style:
+                          TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 16),
+                    ListTile(
+                      leading: Icon(Icons.search),
+                      title: Text('Search [medication name]'),
+                      subtitle:
+                          Text('Search for information about a medication'),
+                    ),
+                    ListTile(
+                      leading: Icon(Icons.volume_up),
+                      title: Text('Read [medication name]'),
+                      subtitle:
+                          Text('Read information about a specific medication'),
+                    ),
+                    ListTile(
+                      leading: Icon(Icons.help),
+                      title: Text('What is [medication name]'),
+                      subtitle:
+                          Text('Get detailed information about a medication'),
+                    ),
+                    ListTile(
+                      leading: Icon(Icons.warning),
+                      title: Text('Side effects of [medication name]'),
+                      subtitle: Text('Learn about potential side effects'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildFloatingActionButton() {
     return Column(
@@ -1218,146 +1093,6 @@ Widget _buildSimilarMedicationsCarousel(List<dynamic> similarMeds) {
       ],
     );
   }
-
-  void _processVoiceCommand(String command) async {
-    final lowerCommand = command.toLowerCase().trim();
-    // Regex for commands like "search ibuprofen", "read Tylenol", etc.
-    final RegExp commandRegex =
-        RegExp(r'^(search|read|what is|side effects of)\s+(.+)$');
-    final match = commandRegex.firstMatch(lowerCommand);
-    if (match != null) {
-      final action = match.group(1)!;
-      final medicationQuery = match.group(2)!;
-      final medicationName = StringUtils.toTitleCase(medicationQuery);
-      await _performMedicationQuery(action, medicationName);
-    } else {
-      await _speak(
-          "Command not recognized. Please try again with a valid phrase such as 'Search Lipitor' or 'What is Advil'.");
-    }
-  }
-
-  Future<void> _performMedicationQuery(
-      String action, String medicationName) async {
-    bool found = false;
-
-    // First, check in the already recognized medications
-    for (var med in recognizedMedications) {
-      if (med.brandName.toLowerCase() == medicationName.toLowerCase() ||
-          med.genericName.toLowerCase() == medicationName.toLowerCase()) {
-        found = true;
-        if (action.contains("read") ||
-            action.contains("what is") ||
-            action.contains("side effects")) {
-          await _speak(
-              "Medication ${med.brandName} found. Generic name is ${med.genericName}.");
-          if (medicationDetails.containsKey(med.genericName)) {
-            final details = medicationDetails[med.genericName];
-            final usageInfo =
-                details['usage'] ?? 'No usage information available';
-            final sideEffects = details['sideEffects'] ??
-                'No side effects information available';
-            await _speak("Usage: $usageInfo. Side effects: $sideEffects.");
-          } else {
-            await _speak(
-                "No additional details are available for ${med.brandName}.");
-          }
-        } else {
-          await _speak(
-              "Medication ${med.brandName} found. Generic name: ${med.genericName}.");
-        }
-        break;
-      }
-    }
-
-    // If not found locally, search in the database if connected
-    if (!found && _isConnected) {
-      try {
-        await _mongoService.connect();
-        final result =
-            await _mongoService.searchMedicationByName(medicationName);
-        await _mongoService.close();
-        if (result != null) {
-          found = true;
-          if (action.contains("read") ||
-              action.contains("what is") ||
-              action.contains("side effects")) {
-            await _speak(
-                "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
-            final details = await _mongoService
-                .fetchMedicationDetails(result['genericName']);
-            if (details != null) {
-              final usage =
-                  details['usage'] ?? 'No usage information available';
-              final sideEffects = details['sideEffects'] ??
-                  'No side effects information available';
-              await _speak("Usage: $usage. Side effects: $sideEffects.");
-            } else {
-              await _speak("No additional details available.");
-            }
-          } else {
-            await _speak(
-                "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
-          }
-        }
-      } catch (e) {
-        debugPrint("Error searching database: $e");
-      }
-    }
-
-    if (!found) {
-      await _speak("No medication matching $medicationName was found.");
-    }
-  }
-
-  Future<void> _searchByVoiceQuery() async {
-    if (_voiceSearchQuery.isEmpty) {
-      await _speak("Please say a medication name first.");
-      return;
-    }
-
-    final query = StringUtils.toTitleCase(_voiceSearchQuery);
-    bool found = false;
-
-    // First search in recognized medications
-    for (var med in recognizedMedications) {
-      if (med.brandName.contains(query) || med.genericName.contains(query)) {
-        found = true;
-        await _speak(
-            "Medication ${med.brandName} found. Its generic name is ${med.genericName}.");
-        if (medicationDetails.containsKey(med.genericName)) {
-          final details = medicationDetails[med.genericName];
-          final usageInfo =
-              details['usage'] ?? 'No usage information available';
-          await _speak("Usage information: $usageInfo");
-        }
-      }
-    }
-
-    // If not found in recognized medications, search the database
-    if (!found && _isConnected) {
-      try {
-        await _mongoService.connect();
-        final result = await _mongoService.searchMedicationByName(query);
-        await _mongoService.close();
-
-        if (result != null) {
-          found = true;
-          await _speak(
-              "Medication ${result['brandName']} found in database. Generic name: ${result['genericName']}.");
-        }
-      } catch (e) {
-        debugPrint("Database search error: $e");
-      }
-    }
-
-    if (!found) {
-      await _speak("No medication matching $query was found.");
-    }
-  }
-
-  void _navigateToCameraScreen(BuildContext context) async {
-    Navigator.of(context).pop(); // Return to camera screen
-  }
 }
 
 // -------------------- Helper Classes -------------------- //
@@ -1375,17 +1110,20 @@ class StringUtils {
   }
 }
 
+// Consolidated MedicationInfo class
 class MedicationInfo {
   final String brandName;
   final String genericName;
   final double confidence;
-  final String source; // 'database', 'nlp', or 'tflite'
+  final String source; // e.g., 'database', 'nlp', 'tflite'
+  final Map<String, dynamic>? metadata;
 
   MedicationInfo({
     required this.brandName,
     required this.genericName,
     required this.confidence,
     required this.source,
+    this.metadata,
   });
 
   Map<String, dynamic> toJson() {
@@ -1394,6 +1132,7 @@ class MedicationInfo {
       'genericName': genericName,
       'confidence': confidence,
       'source': source,
+      'metadata': metadata,
     };
   }
 
@@ -1401,8 +1140,11 @@ class MedicationInfo {
     return MedicationInfo(
       brandName: json['brandName'] ?? '',
       genericName: json['genericName'] ?? '',
-      confidence: json['confidence'] ?? 0.0,
+      confidence: (json['confidence'] is int)
+          ? (json['confidence'] as int).toDouble()
+          : json['confidence'] ?? 0.0,
       source: json['source'] ?? '',
+      metadata: json['metadata'] ?? {},
     );
   }
 }
@@ -1410,7 +1152,7 @@ class MedicationInfo {
 class MedicationCache {
   static const String _cacheKey = 'medication_cache';
   static const Duration _maxCacheAge = Duration(days: 30);
-  
+
   static Future<void> cacheMedications(Map<String, dynamic> data) async {
     final prefs = await SharedPreferences.getInstance();
     final cacheData = {
@@ -1419,29 +1161,28 @@ class MedicationCache {
     };
     await prefs.setString(_cacheKey, jsonEncode(cacheData));
   }
-  
+
   static Future<Map<String, dynamic>?> getCachedMedications() async {
     final prefs = await SharedPreferences.getInstance();
     final cachedString = prefs.getString(_cacheKey);
-    
+
     if (cachedString == null) return null;
-    
+
     try {
       final cacheData = jsonDecode(cachedString);
       final timestamp = cacheData['timestamp'] as int;
       final cacheAge = DateTime.now().millisecondsSinceEpoch - timestamp;
-      
-      // Check if cache is still valid
+
       if (cacheAge < _maxCacheAge.inMilliseconds) {
         return cacheData['data'];
       }
     } catch (e) {
       debugPrint('Cache parsing error: $e');
     }
-    
+
     return null;
   }
-  
+
   static Future<void> invalidateCache() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_cacheKey);
@@ -1449,52 +1190,48 @@ class MedicationCache {
 }
 
 class LazyMedicationDatabase {
-  static final LazyMedicationDatabase _instance = LazyMedicationDatabase._internal();
+  static final LazyMedicationDatabase _instance =
+      LazyMedicationDatabase._internal();
   factory LazyMedicationDatabase() => _instance;
   LazyMedicationDatabase._internal();
-  
+
   Map<String, MedicationInfo>? _cachedMedications;
   DateTime? _lastFetchTime;
   bool _isLoading = false;
   final _loadingCompleter = Completer<void>();
-  
+
   Future<Map<String, MedicationInfo>> getMedications() async {
-    // Return cached data if available and fresh
-    if (_cachedMedications != null && 
-        _lastFetchTime != null && 
+    if (_cachedMedications != null &&
+        _lastFetchTime != null &&
         DateTime.now().difference(_lastFetchTime!) < Duration(hours: 12)) {
       return _cachedMedications!;
     }
-    
-    // Wait if already loading
+
     if (_isLoading) {
       await _loadingCompleter.future;
       return _cachedMedications!;
     }
-    
-    // Load data
+
     _isLoading = true;
     try {
       final mongoService = MongoService();
       await mongoService.connect();
+      // Make sure MongoService includes a fetchAllMedications method.
       final medicationData = await mongoService.fetchAllMedications();
       await mongoService.close();
-      
-      // Convert to medication info objects
+
       _cachedMedications = {};
       for (final med in medicationData) {
         final info = MedicationInfo.fromJson(med);
         _cachedMedications![info.genericName.toLowerCase()] = info;
       }
-      
+
       _lastFetchTime = DateTime.now();
       return _cachedMedications!;
     } catch (e) {
       debugPrint('Error loading medication database: $e');
-      // Try to load from cache as fallback
       final cachedData = await MedicationCache.getCachedMedications();
       if (cachedData != null) {
-        // Convert cached data to medication info objects
         _cachedMedications = {};
         for (final med in cachedData['medications']) {
           final info = MedicationInfo.fromJson(med);

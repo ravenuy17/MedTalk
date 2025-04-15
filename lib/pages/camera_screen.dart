@@ -2,7 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'dart:io';
-import 'medication_reader_screen.dart';
+import 'enhanced_medication_reader.dart';
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -63,7 +63,7 @@ class _CameraScreenState extends State<CameraScreen> {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (context) => MedicationReaderScreen(
+          builder: (context) => EnhancedMedicationReaderScreen(
             imagePath: filePath,
           ),
         ),
